@@ -534,7 +534,7 @@ public class SmsNumberUtils {
         if (DBG) Rlog.d(TAG, "enter filterDestAddr. destAddr=\"" + destAddr + "\"" );
 
         if (destAddr == null || !PhoneNumberUtils.isGlobalPhoneNumber(destAddr)) {
-            Rlog.w(TAG, "destAddr" + destAddr + " is not a global phone number!");
+            Rlog.w(TAG, "destAddr" + destAddr + " is not a global phone number! Nothing changed.");
             return destAddr;
         }
 
@@ -543,7 +543,7 @@ public class SmsNumberUtils {
 
         if (needToConvert(phoneBase)) {
             final int networkType = getNetworkType(phoneBase);
-            if (networkType != -1) {
+            if (networkType != -1 && !TextUtils.isEmpty(networkOperator)) {
                 String networkMcc = networkOperator.substring(0, 3);
                 if (networkMcc != null && networkMcc.trim().length() > 0) {
                     result = formatNumber(phoneBase.getContext(), destAddr, networkMcc, networkType);
@@ -551,7 +551,10 @@ public class SmsNumberUtils {
             }
         }
 
-        if (DBG) Rlog.d(TAG, "leave filterDestAddr, new destAddr=\"" + result + "\"" );
+        if (DBG) {
+            Rlog.d(TAG, "destAddr is " + ((result != null)?"formatted.":"not formatted."));
+            Rlog.d(TAG, "leave filterDestAddr, new destAddr=\"" + (result != null ? result : destAddr) + "\"" );
+        }
         return result != null ? result : destAddr;
     }
 
@@ -578,10 +581,10 @@ public class SmsNumberUtils {
     }
 
     private static boolean isInternationalRoaming(PhoneBase phoneBase) {
-        String operatorIsoCountry = phoneBase.getSystemProperty(
-                TelephonyProperties.PROPERTY_OPERATOR_ISO_COUNTRY, "");
-        String simIsoCountry = phoneBase.getSystemProperty(
-                TelephonyProperties.PROPERTY_ICC_OPERATOR_ISO_COUNTRY, "");
+        String operatorIsoCountry = TelephonyManager.getDefault().getNetworkCountryIsoForPhone(
+                phoneBase.getPhoneId());
+        String simIsoCountry = TelephonyManager.getDefault().getSimCountryIsoForPhone(
+                phoneBase.getPhoneId());
         boolean internationalRoaming = !TextUtils.isEmpty(operatorIsoCountry)
                 && !TextUtils.isEmpty(simIsoCountry)
                 && !simIsoCountry.equals(operatorIsoCountry);

@@ -29,6 +29,7 @@ import android.telecom.Log;
 import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.Rlog;
+import android.text.TextUtils;
 
 import com.android.ims.ImsException;
 import com.android.ims.ImsStreamMediaProfile;
@@ -77,6 +78,9 @@ public class ImsPhoneConnection extends Connection {
 
     private PowerManager.WakeLock mPartialWakeLock;
 
+    // The cached connect time of the connection when it turns into a conference.
+    private long mConferenceConnectTime = 0;
+
     //***** Event Constants
     private static final int EVENT_DTMF_DONE = 1;
     private static final int EVENT_PAUSE_DONE = 2;
@@ -113,7 +117,8 @@ public class ImsPhoneConnection extends Connection {
 
     /** This is probably an MT call */
     /*package*/
-    ImsPhoneConnection(Context context, ImsCall imsCall, ImsPhoneCallTracker ct, ImsPhoneCall parent) {
+    ImsPhoneConnection(Context context, ImsCall imsCall, ImsPhoneCallTracker ct,
+            ImsPhoneCall parent) {
         createWakeLock(context);
         acquireWakeLock();
 
@@ -128,7 +133,6 @@ public class ImsPhoneConnection extends Connection {
                     imsCall.getCallProfile().getCallExtraInt(ImsCallProfile.EXTRA_OIR));
             mCnapNamePresentation = ImsCallProfile.OIRToPresentation(
                     imsCall.getCallProfile().getCallExtraInt(ImsCallProfile.EXTRA_CNAP));
-
             updateMediaCapabilities(imsCall);
         } else {
             mNumberPresentation = PhoneConstants.PRESENTATION_UNKNOWN;
@@ -141,13 +145,16 @@ public class ImsPhoneConnection extends Connection {
 
         //mIndex = index;
 
+        updateWifiState();
+
         mParent = parent;
         mParent.attach(this, ImsPhoneCall.State.INCOMING);
     }
 
     /** This is an MO call, created when dialing */
     /*package*/
-    ImsPhoneConnection(Context context, String dialString, ImsPhoneCallTracker ct, ImsPhoneCall parent) {
+    ImsPhoneConnection(Context context, String dialString, ImsPhoneCallTracker ct,
+            ImsPhoneCall parent) {
         createWakeLock(context);
         acquireWakeLock();
 
@@ -216,6 +223,11 @@ public class ImsPhoneConnection extends Connection {
 
     public void setDisconnectCause(int cause) {
         mCause = cause;
+    }
+
+    @Override
+    public String getVendorDisconnectCause() {
+      return null;
     }
 
     public ImsPhoneCallTracker getOwner () {
@@ -302,7 +314,7 @@ public class ImsPhoneConnection extends Connection {
     }
 
     /** Called when the connection has been disconnected */
-    /*package*/ boolean
+    public boolean
     onDisconnect(int cause) {
         Rlog.d(LOG_TAG, "onDisconnect: cause=" + cause);
         if (mCause != DisconnectCause.LOCAL) mCause = cause;
@@ -366,7 +378,7 @@ public class ImsPhoneConnection extends Connection {
     private boolean
     processPostDialChar(char c) {
         if (PhoneNumberUtils.is12Key(c)) {
-            mOwner.mCi.sendDtmf(c, mHandler.obtainMessage(EVENT_DTMF_DONE));
+            mOwner.sendDtmf(c, mHandler.obtainMessage(EVENT_DTMF_DONE));
         } else if (c == PhoneNumberUtils.PAUSE) {
             // From TS 22.101:
             // It continues...
@@ -423,8 +435,7 @@ public class ImsPhoneConnection extends Connection {
             return;
         }
 
-        if (mPostDialString == null ||
-                mPostDialString.length() <= mNextPostDialChar) {
+        if (mPostDialString == null || mPostDialString.length() <= mNextPostDialChar) {
             setPostDialState(PostDialState.COMPLETE);
 
             // notifyMessage.arg1 is 0 on complete
@@ -447,6 +458,9 @@ public class ImsPhoneConnection extends Connection {
             }
         }
 
+        notifyPostDialListenersNextChar(c);
+
+        // TODO: remove the following code since the handler no longer executes anything.
         postDialHandler = mOwner.mPhone.mPostDialHandler;
 
         Message notifyMessage;
@@ -462,7 +476,8 @@ public class ImsPhoneConnection extends Connection {
             // arg1 is the character that was/is being processed
             notifyMessage.arg1 = c;
 
-            //Rlog.v(LOG_TAG, "##### processNextPostDialChar: send msg to postDialHandler, arg1=" + c);
+            //Rlog.v(LOG_TAG,
+            //      "##### processNextPostDialChar: send msg to postDialHandler, arg1=" + c);
             notifyMessage.sendToTarget();
         }
     }
@@ -485,6 +500,7 @@ public class ImsPhoneConnection extends Connection {
             releaseWakeLock();
         }
         mPostDialState = s;
+        notifyPostDialListeners();
     }
 
     private void
@@ -529,6 +545,21 @@ public class ImsPhoneConnection extends Connection {
         return mImsCall != null && mImsCall.isMultiparty();
     }
 
+    /**
+     * Where {@link #isMultiparty()} is {@code true}, determines if this {@link ImsCall} is the
+     * origin of the conference call (i.e. {@code #isConferenceHost()} is {@code true}), or if this
+     * {@link ImsCall} is a member of a conference hosted on another device.
+     *
+     * @return {@code true} if this call is the origin of the conference call it is a member of,
+     *      {@code false} otherwise.
+     */
+    public boolean isConferenceHost() {
+        if (mImsCall == null) {
+            return false;
+        }
+        return mImsCall.isConferenceHost();
+    }
+
     /*package*/ ImsCall getImsCall() {
         return mImsCall;
     }
@@ -547,6 +578,15 @@ public class ImsPhoneConnection extends Connection {
      */
     /*package*/ boolean update(ImsCall imsCall, ImsPhoneCall.State state) {
         if (state == ImsPhoneCall.State.ACTIVE) {
+            // If the state of the call is active, but there is a pending request to the RIL to hold
+            // the call, we will skip this update.  This is really a signalling delay or failure
+            // from the RIL, but we will prevent it from going through as we will end up erroneously
+            // making this call active when really it should be on hold.
+            if (imsCall.isPendingHold()) {
+                Rlog.w(LOG_TAG, "update : state is ACTIVE, but call is pending hold, skipping");
+                return false;
+            }
+
             if (mParent.getState().isRinging() || mParent.getState().isDialing()) {
                 onConnectedInOrOut();
             }
@@ -564,7 +604,11 @@ public class ImsPhoneConnection extends Connection {
             onStartedHolding();
         }
 
-        return mParent.update(this, imsCall, state) || updateMediaCapabilities(imsCall);
+        boolean updateParent = mParent.update(this, imsCall, state);
+        boolean updateWifiState = updateWifiState();
+        boolean updateAddressDisplay = updateAddressDisplay(imsCall);
+
+        return updateParent || updateWifiState || updateAddressDisplay;
     }
 
     @Override
@@ -594,13 +638,80 @@ public class ImsPhoneConnection extends Connection {
     }
 
     /**
+     * Sets the conference connect time.  Used when an {@code ImsConference} is created to out of
+     * this phone connection.
+     *
+     * @param conferenceConnectTime The conference connect time.
+     */
+    public void setConferenceConnectTime(long conferenceConnectTime) {
+        mConferenceConnectTime = conferenceConnectTime;
+    }
+
+    /**
+     * @return The conference connect time.
+     */
+    public long getConferenceConnectTime() {
+        return mConferenceConnectTime;
+    }
+
+    /**
+     * Check for a change in the address display related fields for the {@link ImsCall}, and
+     * update the {@link ImsPhoneConnection} with this information.
+     *
+     * @param imsCall The call to check for changes in address display fields.
+     * @return Whether the address display fields have been changed.
+     */
+    private boolean updateAddressDisplay(ImsCall imsCall) {
+        if (imsCall == null) {
+            return false;
+        }
+
+        boolean changed = false;
+        ImsCallProfile callProfile = imsCall.getCallProfile();
+        if (callProfile != null) {
+            String address = callProfile.getCallExtra(ImsCallProfile.EXTRA_OI);
+            String name = callProfile.getCallExtra(ImsCallProfile.EXTRA_CNA);
+            int nump = ImsCallProfile.OIRToPresentation(
+                    callProfile.getCallExtraInt(ImsCallProfile.EXTRA_OIR));
+            int namep = ImsCallProfile.OIRToPresentation(
+                    callProfile.getCallExtraInt(ImsCallProfile.EXTRA_CNAP));
+            if (Phone.DEBUG_PHONE) {
+                Rlog.d(LOG_TAG, "address = " +  address + " name = " + name +
+                        " nump = " + nump + " namep = " + namep);
+            }
+            if(equalsHandlesNulls(mAddress, address)) {
+                mAddress = address;
+                changed = true;
+            }
+            if (TextUtils.isEmpty(name)) {
+                if (!TextUtils.isEmpty(mCnapName)) {
+                    mCnapName = "";
+                    changed = true;
+                }
+            } else if (!name.equals(mCnapName)) {
+                mCnapName = name;
+                changed = true;
+            }
+            if (mNumberPresentation != nump) {
+                mNumberPresentation = nump;
+                changed = true;
+            }
+            if (mCnapNamePresentation != namep) {
+                mCnapNamePresentation = namep;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    /**
      * Check for a change in the video capabilities and audio quality for the {@link ImsCall}, and
      * update the {@link ImsPhoneConnection} with this information.
      *
      * @param imsCall The call to check for changes in media capabilities.
      * @return Whether the media capabilities have been changed.
      */
-    private boolean updateMediaCapabilities(ImsCall imsCall) {
+    public boolean updateMediaCapabilities(ImsCall imsCall) {
         if (imsCall == null) {
             return false;
         }
@@ -608,8 +719,23 @@ public class ImsPhoneConnection extends Connection {
         boolean changed = false;
 
         try {
+            // The actual call profile (negotiated between local and peer).
+            ImsCallProfile negotiatedCallProfile = imsCall.getCallProfile();
+            // The capabilities of the local device.
             ImsCallProfile localCallProfile = imsCall.getLocalCallProfile();
+            // The capabilities of the peer device.
             ImsCallProfile remoteCallProfile = imsCall.getRemoteCallProfile();
+
+            if (negotiatedCallProfile != null) {
+                int oldVideoState = getVideoState();
+                int newVideoState = ImsCallProfile
+                        .getVideoStateFromImsCallProfile(negotiatedCallProfile);
+
+                if (oldVideoState != newVideoState) {
+                    setVideoState(newVideoState);
+                    changed = true;
+                }
+            }
 
             if (localCallProfile != null) {
                 int callType = localCallProfile.mCallType;
@@ -619,12 +745,16 @@ public class ImsPhoneConnection extends Connection {
                     setLocalVideoCapable(newLocalVideoCapable);
                     changed = true;
                 }
+            }
 
-                int newVideoState = ImsCallProfile.getVideoStateFromCallType(callType);
-                if (getVideoState() != newVideoState) {
-                    setVideoState(newVideoState);
-                    changed = true;
-                }
+            if (remoteCallProfile != null) {
+                    boolean newRemoteVideoCapable = remoteCallProfile.mCallType
+                            == ImsCallProfile.CALL_TYPE_VT;
+
+                    if (isRemoteVideoCapable() != newRemoteVideoCapable) {
+                        setRemoteVideoCapable(newRemoteVideoCapable);
+                        changed = true;
+                    }
             }
 
             int newAudioQuality =
@@ -638,6 +768,21 @@ public class ImsPhoneConnection extends Connection {
         }
 
         return changed;
+    }
+
+    /**
+     * Check for a change in the wifi state of the ImsPhoneCallTracker and update the
+     * {@link ImsPhoneConnection} with this information.
+     *
+     * @return Whether the ImsPhoneCallTracker's usage of wifi has been changed.
+     */
+    public boolean updateWifiState() {
+        Rlog.d(LOG_TAG, "updateWifiState: " + mOwner.isVowifiEnabled());
+        if (isWifi() != mOwner.isVowifiEnabled()) {
+            setWifi(mOwner.isVowifiEnabled());
+            return true;
+        }
+        return false;
     }
 
     /**

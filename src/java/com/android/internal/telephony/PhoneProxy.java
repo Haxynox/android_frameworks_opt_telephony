@@ -24,10 +24,13 @@ import android.content.Intent;
 import android.net.LinkProperties;
 import android.net.NetworkCapabilities;
 import android.os.AsyncResult;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.telephony.CarrierConfigManager;
 import android.telephony.CellInfo;
 import android.telephony.CellLocation;
 import android.telephony.Rlog;
@@ -40,7 +43,6 @@ import com.android.internal.telephony.gsm.GSMPhone;
 import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.telephony.test.SimulatedRadioControl;
 import com.android.internal.telephony.cdma.CDMALTEPhone;
-import com.android.internal.telephony.RadioCapability;
 import com.android.internal.telephony.uicc.IccCardProxy;
 import com.android.internal.telephony.uicc.IccFileHandler;
 import com.android.internal.telephony.uicc.IsimRecords;
@@ -50,6 +52,7 @@ import com.android.internal.telephony.uicc.UsimServiceTable;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.List;
+import java.util.Locale;
 
 import com.android.internal.telephony.dataconnection.DctController;
 
@@ -176,13 +179,20 @@ public class PhoneProxy extends Handler implements Phone {
 
         if (mActivePhone != null) {
             // Check for a voice over lte replacement
-            if ((newVoiceRadioTech == ServiceState.RIL_RADIO_TECHNOLOGY_LTE) ||
-                    (newVoiceRadioTech == ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN)) {
-                int volteReplacementRat = mActivePhone.getContext().getResources().getInteger(
-                        com.android.internal.R.integer.config_volte_replacement_rat);
-                logd("phoneObjectUpdater: volteReplacementRat=" + volteReplacementRat);
-                if (volteReplacementRat != ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN) {
-                    newVoiceRadioTech = volteReplacementRat;
+            if ((newVoiceRadioTech == ServiceState.RIL_RADIO_TECHNOLOGY_LTE)
+                    || (newVoiceRadioTech == ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN)) {
+                CarrierConfigManager configMgr = (CarrierConfigManager)
+                        mActivePhone.getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
+                PersistableBundle b = configMgr.getConfigForSubId(mActivePhone.getSubId());
+                if (b != null) {
+                    int volteReplacementRat =
+                            b.getInt(CarrierConfigManager.KEY_VOLTE_REPLACEMENT_RAT_INT);
+                    logd("phoneObjectUpdater: volteReplacementRat=" + volteReplacementRat);
+                    if (volteReplacementRat != ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN) {
+                        newVoiceRadioTech = volteReplacementRat;
+                    }
+                } else {
+                    loge("phoneObjectUpdater: didn't get volteReplacementRat from carrier config");
                 }
             }
 
@@ -300,6 +310,7 @@ public class PhoneProxy extends Handler implements Phone {
             if (imsPhone != null) {
                 mActivePhone.acquireOwnershipOfImsPhone(imsPhone);
             }
+            mActivePhone.startMonitoringImsService();
             mActivePhone.registerForSimRecordsLoaded(this, EVENT_SIM_RECORDS_LOADED, null);
         }
 
@@ -329,6 +340,11 @@ public class PhoneProxy extends Handler implements Phone {
 
     public IccFileHandler getIccFileHandler() {
         return ((PhoneBase)mActivePhone).getIccFileHandler();
+    }
+
+    @Override
+    public boolean isVideoCallPresent() {
+        return mActivePhone.isVideoCallPresent();
     }
 
     @Override
@@ -476,6 +492,17 @@ public class PhoneProxy extends Handler implements Phone {
     @Override
     public void unregisterForNewRingingConnection(Handler h) {
         mActivePhone.unregisterForNewRingingConnection(h);
+    }
+
+    @Override
+    public void registerForVideoCapabilityChanged(
+            Handler h, int what, Object obj) {
+        mActivePhone.registerForVideoCapabilityChanged(h, what, obj);
+    }
+
+    @Override
+    public void unregisterForVideoCapabilityChanged(Handler h) {
+        mActivePhone.unregisterForVideoCapabilityChanged(h);
     }
 
     @Override
@@ -648,6 +675,16 @@ public class PhoneProxy extends Handler implements Phone {
     }
 
     @Override
+    public void registerForTtyModeReceived(Handler h, int what, Object obj) {
+        mActivePhone.registerForTtyModeReceived(h, what, obj);
+    }
+
+    @Override
+    public void unregisterForTtyModeReceived(Handler h) {
+        mActivePhone.unregisterForTtyModeReceived(h);
+    }
+
+    @Override
     public boolean getIccRecordsLoaded() {
         return mIccCardProxy.getIccRecordsLoaded();
     }
@@ -728,8 +765,9 @@ public class PhoneProxy extends Handler implements Phone {
     }
 
     @Override
-    public Connection dial(String dialString, UUSInfo uusInfo, int videoState) throws CallStateException {
-        return mActivePhone.dial(dialString, uusInfo, videoState);
+    public Connection dial(String dialString, UUSInfo uusInfo, int videoState, Bundle intentExtras)
+            throws CallStateException {
+        return mActivePhone.dial(dialString, uusInfo, videoState, intentExtras);
     }
 
     @Override
@@ -798,8 +836,8 @@ public class PhoneProxy extends Handler implements Phone {
     }
 
     @Override
-    public void setLine1Number(String alphaTag, String number, Message onComplete) {
-        mActivePhone.setLine1Number(alphaTag, number, onComplete);
+    public boolean setLine1Number(String alphaTag, String number, Message onComplete) {
+        return mActivePhone.setLine1Number(alphaTag, number, onComplete);
     }
 
     @Override
@@ -1034,6 +1072,11 @@ public class PhoneProxy extends Handler implements Phone {
     @Override
     public String getGroupIdLevel1() {
         return mActivePhone.getGroupIdLevel1();
+    }
+
+    @Override
+    public String getGroupIdLevel2() {
+        return mActivePhone.getGroupIdLevel2();
     }
 
     @Override
@@ -1433,6 +1476,9 @@ public class PhoneProxy extends Handler implements Phone {
     public ImsPhone relinquishOwnershipOfImsPhone() { return null; }
 
     @Override
+    public void startMonitoringImsService() {}
+
+    @Override
     public void acquireOwnershipOfImsPhone(ImsPhone imsPhone) { }
 
     @Override
@@ -1446,8 +1492,21 @@ public class PhoneProxy extends Handler implements Phone {
     }
 
     @Override
+    public boolean setRoamingOverride(List<String> gsmRoamingList,
+            List<String> gsmNonRoamingList, List<String> cdmaRoamingList,
+            List<String> cdmaNonRoamingList) {
+        return mActivePhone.setRoamingOverride(gsmRoamingList, gsmNonRoamingList,
+                cdmaRoamingList, cdmaNonRoamingList);
+    }
+
+    @Override
     public boolean isRadioAvailable() {
         return mCommandsInterface.getRadioState().isAvailable();
+    }
+
+    @Override
+    public boolean isRadioOn() {
+        return mCommandsInterface.getRadioState().isOn();
     }
 
     @Override
@@ -1466,6 +1525,21 @@ public class PhoneProxy extends Handler implements Phone {
     }
 
     @Override
+    public String getModemUuId() {
+        return mActivePhone.getModemUuId();
+    }
+
+    @Override
+    public RadioCapability getRadioCapability() {
+        return mActivePhone.getRadioCapability();
+    }
+
+    @Override
+    public void radioCapabilityUpdated(RadioCapability rc) {
+        mActivePhone.radioCapabilityUpdated(rc);
+    }
+
+    @Override
     public void registerForRadioCapabilityChanged(Handler h, int what, Object obj) {
         mActivePhone.registerForRadioCapabilityChanged(h, what, obj);
     }
@@ -1473,6 +1547,60 @@ public class PhoneProxy extends Handler implements Phone {
     @Override
     public void unregisterForRadioCapabilityChanged(Handler h) {
         mActivePhone.unregisterForRadioCapabilityChanged(h);
+    }
+
+    public IccCardProxy getPhoneIccCardProxy() {
+        return mIccCardProxy;
+    }
+
+    public boolean isImsRegistered() {
+        return mActivePhone.isImsRegistered();
+    }
+
+    /**
+     * Determines if video calling is enabled for the IMS phone.
+     *
+     * @return {@code true} if video calling is enabled.
+     */
+    @Override
+    public boolean isVideoEnabled() {
+        return mActivePhone.isVideoEnabled();
+    }
+
+    /**
+     * Returns the status of Link Capacity Estimation (LCE) service.
+     */
+    @Override
+    public int getLceStatus() {
+        return mActivePhone.getLceStatus();
+    }
+
+    @Override
+    public Locale getLocaleFromSimAndCarrierPrefs() {
+        return mActivePhone.getLocaleFromSimAndCarrierPrefs();
+    }
+
+    @Override
+    public void getModemActivityInfo(Message response)  {
+        mActivePhone.getModemActivityInfo(response);
+    }
+
+    /**
+     * @return true if we are in the emergency call back mode. This is a period where
+     * the phone should be using as little power as possible and be ready to receive an
+     * incoming call from the emergency operator.
+     */
+    @Override
+    public boolean isInEcm() {
+        return mActivePhone.isInEcm();
+    }
+
+    public boolean isVolteEnabled() {
+        return mActivePhone.isVolteEnabled();
+    }
+
+    public boolean isWifiCallingEnabled() {
+        return mActivePhone.isWifiCallingEnabled();
     }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {

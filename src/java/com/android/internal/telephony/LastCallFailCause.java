@@ -16,37 +16,14 @@
 
 package com.android.internal.telephony;
 
-/**
- * {@hide}
- */
-public class CallStateException extends Exception
-{
-    private int mError = ERROR_INVALID;
+public class LastCallFailCause {
+  public int causeCode;
+  public String vendorCause;
 
-    /** The error code is not valid (Not received a disconnect cause) */
-    public static final int ERROR_INVALID = -1;
-
-    public static final int ERROR_DISCONNECTED = 1;
-
-    public
-    CallStateException()
-    {
-    }
-
-    public
-    CallStateException(String string)
-    {
-        super(string);
-    }
-
-    public
-    CallStateException(int error, String string)
-    {
-        super(string);
-        mError = error;
-    }
-
-    public int getError() {
-        return mError;
+    @Override
+    public String toString() {
+        return super.toString()
+            + " causeCode: " + causeCode
+            + " vendorCause: " + vendorCause;
     }
 }

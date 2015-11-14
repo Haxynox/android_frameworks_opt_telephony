@@ -17,7 +17,6 @@
 package com.android.internal.telephony.gsm;
 
 import android.app.Activity;
-import android.app.AppOpsManager;
 import android.app.PendingIntent;
 import android.app.PendingIntent.CanceledException;
 import android.content.Intent;
@@ -157,7 +156,8 @@ public final class GsmSMSDispatcher extends SMSDispatcher {
         if (pdu != null) {
             HashMap map = getSmsTrackerMap(destAddr, scAddr, destPort, data, pdu);
             SmsTracker tracker = getSmsTracker(map, sentIntent, deliveryIntent, getFormat(),
-                    null /*messageUri*/, false /*isExpectMore*/, null /*fullMessageText*/);
+                    null /*messageUri*/, false /*isExpectMore*/, null /*fullMessageText*/,
+                    false /*isText*/, true /*persistMessage*/);
 
             String carrierPackage = getCarrierAppPackageName();
             if (carrierPackage != null) {
@@ -176,13 +176,15 @@ public final class GsmSMSDispatcher extends SMSDispatcher {
     /** {@inheritDoc} */
     @Override
     protected void sendText(String destAddr, String scAddr, String text, PendingIntent sentIntent,
-            PendingIntent deliveryIntent, Uri messageUri, String callingPkg) {
+            PendingIntent deliveryIntent, Uri messageUri, String callingPkg,
+            boolean persistMessage) {
         SmsMessage.SubmitPdu pdu = SmsMessage.getSubmitPdu(
                 scAddr, destAddr, text, (deliveryIntent != null));
         if (pdu != null) {
             HashMap map = getSmsTrackerMap(destAddr, scAddr, text, pdu);
             SmsTracker tracker = getSmsTracker(map, sentIntent, deliveryIntent, getFormat(),
-                    messageUri, false /*isExpectMore*/, text /*fullMessageText*/);
+                    messageUri, false /*isExpectMore*/, text /*fullMessageText*/, true /*isText*/,
+                    persistMessage);
 
             String carrierPackage = getCarrierAppPackageName();
             if (carrierPackage != null) {
@@ -226,7 +228,8 @@ public final class GsmSMSDispatcher extends SMSDispatcher {
                     message, pdu);
             return getSmsTracker(map, sentIntent,
                     deliveryIntent, getFormat(), unsentPartCount, anyPartFailed, messageUri,
-                    smsHeader, !lastPart, fullMessageText);
+                    smsHeader, !lastPart, fullMessageText, true /*isText*/,
+                    false /*persistMessage*/);
         } else {
             Rlog.e(TAG, "GsmSMSDispatcher.sendNewSubmitPdu(): getSubmitPdu() returned null");
             return null;

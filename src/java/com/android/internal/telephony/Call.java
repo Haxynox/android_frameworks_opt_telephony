@@ -16,6 +16,8 @@
 
 package com.android.internal.telephony;
 
+import android.telecom.ConferenceParticipant;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,6 +44,19 @@ public abstract class Call {
 
         public boolean isDialing() {
             return this == DIALING || this == ALERTING;
+        }
+    }
+
+    public static State
+    stateFromDCState (DriverCall.State dcState) {
+        switch (dcState) {
+            case ACTIVE:        return State.ACTIVE;
+            case HOLDING:       return State.HOLDING;
+            case DIALING:       return State.DIALING;
+            case ALERTING:      return State.ALERTING;
+            case INCOMING:      return State.INCOMING;
+            case WAITING:       return State.WAITING;
+            default:            throw new RuntimeException ("illegal call state:" + dcState);
         }
     }
 
@@ -105,6 +120,14 @@ public abstract class Call {
      */
     public State getState() {
         return mState;
+    }
+
+    /**
+     * getConferenceParticipants
+     * @return List of conference participants.
+     */
+    public List<ConferenceParticipant> getConferenceParticipants() {
+        return null;
     }
 
     /**

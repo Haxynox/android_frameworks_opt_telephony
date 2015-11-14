@@ -17,16 +17,16 @@
 
 package com.android.internal.telephony;
 
-import com.android.internal.telephony.RadioCapability;
-
 import android.content.Context;
 import android.os.Message;
 import android.os.RegistrantList;
 import android.os.Registrant;
 import android.os.Handler;
 import android.os.AsyncResult;
-
+import android.telephony.RadioAccessFamily;
 import android.telephony.TelephonyManager;
+
+import com.android.internal.telephony.RadioCapability;
 
 /**
  * {@hide}
@@ -93,6 +93,7 @@ public abstract class BaseCommands implements CommandsInterface {
     protected Registrant mGsmBroadcastSmsRegistrant;
     protected Registrant mCatCcAlphaRegistrant;
     protected Registrant mSsRegistrant;
+    protected Registrant mLceInfoRegistrant;
 
     // Preferred network type received from PhoneFactory.
     // This is used when establishing a connection to the
@@ -746,14 +747,14 @@ public abstract class BaseCommands implements CommandsInterface {
         mRilConnectedRegistrants.remove(h);
     }
 
-     public void registerForSubscriptionStatusChanged(Handler h, int what, Object obj) {
-         Registrant r = new Registrant (h, what, obj);
-         mSubscriptionStatusRegistrants.add(r);
-     }
+    public void registerForSubscriptionStatusChanged(Handler h, int what, Object obj) {
+        Registrant r = new Registrant (h, what, obj);
+        mSubscriptionStatusRegistrants.add(r);
+    }
 
-     public void unregisterForSubscriptionStatusChanged(Handler h) {
-         mSubscriptionStatusRegistrants.remove(h);
-     }
+    public void unregisterForSubscriptionStatusChanged(Handler h) {
+        mSubscriptionStatusRegistrants.remove(h);
+    }
 
     //***** Protected Methods
     /**
@@ -873,5 +874,30 @@ public abstract class BaseCommands implements CommandsInterface {
     @Override
     public void unregisterForRadioCapabilityChanged(Handler h) {
         mPhoneRadioCapabilityChangedRegistrants.remove(h);
+    }
+
+    @Override
+    public void startLceService(int reportIntervalMs, boolean pullMode, Message result) {
+    }
+
+    @Override
+    public void stopLceService(Message result) {
+    }
+
+    @Override
+    public void pullLceData(Message result) {
+    }
+
+    @Override
+    public void registerForLceInfo(Handler h, int what, Object obj) {
+      mLceInfoRegistrant = new Registrant(h, what, obj);
+    }
+
+    @Override
+    public void unregisterForLceInfo(Handler h) {
+      if (mLceInfoRegistrant != null && mLceInfoRegistrant.getHandler() == h) {
+          mLceInfoRegistrant.clear();
+          mLceInfoRegistrant = null;
+      }
     }
 }

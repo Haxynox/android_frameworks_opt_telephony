@@ -16,11 +16,6 @@
 
 package com.android.internal.telephony.uicc;
 
-
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_ISO_COUNTRY;
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_NUMERIC;
-
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_ALPHA;
 import static com.android.internal.telephony.TelephonyProperties.PROPERTY_TEST_CSIM;
 
 import java.io.FileDescriptor;
@@ -32,14 +27,16 @@ import android.content.Context;
 import android.os.AsyncResult;
 import android.os.Message;
 import android.os.SystemProperties;
-import android.telephony.TelephonyManager;
+import android.telephony.SubscriptionManager;
 import android.telephony.Rlog;
 import android.text.TextUtils;
 import android.util.Log;
+import android.content.res.Resources;
 
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.GsmAlphabet;
 import com.android.internal.telephony.MccTable;
+import com.android.internal.telephony.SubscriptionController;
 
 import com.android.internal.telephony.cdma.sms.UserData;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
@@ -344,7 +341,8 @@ public final class RuimRecords extends IccRecords {
             }
             if (DBG) log("spn=" + getServiceProviderName());
             if (DBG) log("spnCondition=" + mCsimSpnDisplayCondition);
-            SystemProperties.set(PROPERTY_ICC_OPERATOR_ALPHA, getServiceProviderName());
+            mTelephonyManager.setSimOperatorNameForPhone(
+                    mParentApp.getPhoneId(), getServiceProviderName());
         }
     }
 
@@ -374,7 +372,7 @@ public final class RuimRecords extends IccRecords {
         @Override
         public void onRecordLoaded(AsyncResult ar) {
             byte[] data = (byte[]) ar.result;
-            if (DBG) log("CSIM_IMSIM=" + IccUtils.bytesToHexString(data));
+            if (VDBG) log("CSIM_IMSIM=" + IccUtils.bytesToHexString(data));
             // C.S0065 section 5.2.2 for IMSI_M encoding
             // C.S0005 section 2.3.1 for MIN encoding in IMSI_M.
             boolean provisioned = ((data[7] & 0x80) == 0x80);
@@ -539,6 +537,9 @@ public final class RuimRecords extends IccRecords {
                             naiCharArray[index1] = (char)(bitStream.read(8) & 0xFF);
                         }
                         mNai =  new String(naiCharArray);
+                        if (Log.isLoggable(LOG_TAG, Log.VERBOSE)) {
+                            Log.v(LOG_TAG,"MIPUPP Nai = " + mNai);
+                        }
                         return; //need not parsing further
                     } else {
                         //ignore this NAI body
@@ -736,56 +737,6 @@ public final class RuimRecords extends IccRecords {
         return localeLangs;
     }
 
-    private String findBestLanguage(byte[] languages) {
-        final String[] assetLanguages = getAssetLanguages(mContext);
-
-        if ((languages == null) || (assetLanguages == null)) return null;
-
-        // Each 2-bytes consists of one language
-        for (int i = 0; (i + 1) < languages.length; i += 2) {
-            final String lang;
-            try {
-                lang = new String(languages, i, 2, "ISO-8859-1");
-            } catch(java.io.UnsupportedEncodingException e) {
-                log("Failed to parse SIM language records");
-                continue;
-            }
-
-            for (int j = 0; j < assetLanguages.length; j++) {
-                if (assetLanguages[j].equals(lang)) {
-                    return lang;
-                }
-            }
-        }
-
-        // no match found. return null
-        return null;
-    }
-
-    private void setLocaleFromCsim() {
-        String prefLang = null;
-        // check EFli then EFpl
-        prefLang = findBestLanguage(mEFli);
-
-        if (prefLang == null) {
-            prefLang = findBestLanguage(mEFpl);
-        }
-
-        if (prefLang != null) {
-            // check country code from SIM
-            String imsi = getIMSI();
-            String country = null;
-            if (imsi != null) {
-                country = MccTable.countryCodeForMcc(
-                                    Integer.parseInt(imsi.substring(0,3)));
-            }
-            log("Setting locale to " + prefLang + "_" + country);
-            MccTable.setSystemLocale(mContext, prefLang, country);
-        } else {
-            log ("No suitable CSIM selected locale");
-        }
-    }
-
     @Override
     protected void onRecordLoaded() {
         // One record loaded successfully or failed, In either case
@@ -814,23 +765,41 @@ public final class RuimRecords extends IccRecords {
                 log("onAllRecordsLoaded set 'gsm.sim.operator.numeric' to operator='" +
                         operator + "'");
                 log("update icc_operator_numeric=" + operator);
-                SystemProperties.set(PROPERTY_ICC_OPERATOR_NUMERIC, operator);
+                mTelephonyManager.setSimOperatorNumericForPhone(
+                        mParentApp.getPhoneId(), operator);
             } else {
                 log("onAllRecordsLoaded empty 'gsm.sim.operator.numeric' skipping");
             }
 
             if (!TextUtils.isEmpty(mImsi)) {
-                log("onAllRecordsLoaded set mcc imsi=" + mImsi);
-                SystemProperties.set(PROPERTY_ICC_OPERATOR_ISO_COUNTRY,
-                        MccTable.countryCodeForMcc(Integer.parseInt(mImsi.substring(0,3))));
+                log("onAllRecordsLoaded set mcc imsi=" + (VDBG ? ("=" + mImsi) : ""));
+                mTelephonyManager.setSimCountryIsoForPhone(
+                        mParentApp.getPhoneId(),
+                        MccTable.countryCodeForMcc(
+                        Integer.parseInt(mImsi.substring(0,3))));
             } else {
                 log("onAllRecordsLoaded empty imsi skipping setting mcc");
             }
         }
 
-        setLocaleFromCsim();
+        Resources resource = Resources.getSystem();
+        if (resource.getBoolean(com.android.internal.R.bool.config_use_sim_language_file)) {
+            setSimLanguage(mEFli, mEFpl);
+        }
+
         mRecordsLoadedRegistrants.notifyRegistrants(
             new AsyncResult(null, null, null));
+
+        // TODO: The below is hacky since the SubscriptionController may not be ready at this time.
+        if (!TextUtils.isEmpty(mMdn)) {
+            int phoneId = mParentApp.getUiccCard().getPhoneId();
+            int[] subIds = SubscriptionController.getInstance().getSubId(phoneId);
+            if (subIds != null) {
+                SubscriptionManager.from(mContext).setDisplayNumber(mMdn, subIds[0]);
+            } else {
+                log("Cannot call setDisplayNumber: invalid subId");
+            }
+        }
     }
 
     @Override

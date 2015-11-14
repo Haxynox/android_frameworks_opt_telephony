@@ -16,8 +16,8 @@
 
 package android.telephony;
 
+import android.os.Binder;
 import android.os.Parcel;
-import android.telephony.Rlog;
 import android.content.res.Resources;
 import android.text.TextUtils;
 
@@ -149,17 +149,18 @@ public class SmsMessage {
     }
 
     /**
-     * Create an SmsMessage from a raw PDU.
-     *
-     * <p><b>This method will soon be deprecated</b> and all applications which handle
+     * Create an SmsMessage from a raw PDU. Guess format based on Voice
+     * technology first, if it fails use other format.
+     * All applications which handle
      * incoming SMS messages by processing the {@code SMS_RECEIVED_ACTION} broadcast
      * intent <b>must</b> now pass the new {@code format} String extra from the intent
      * into the new method {@code createFromPdu(byte[], String)} which takes an
      * extra format parameter. This is required in order to correctly decode the PDU on
      * devices that require support for both 3GPP and 3GPP2 formats at the same time,
-     * such as dual-mode GSM/CDMA and CDMA/LTE phones.  Guess format based on Voice
-     * technology first, if it fails use other format.
+     * such as dual-mode GSM/CDMA and CDMA/LTE phones.
+     * @deprecated Use {@link #createFromPdu(byte[], String)} instead.
      */
+    @Deprecated
     public static SmsMessage createFromPdu(byte[] pdu) {
          SmsMessage message = null;
 
@@ -181,13 +182,15 @@ public class SmsMessage {
 
     /**
      * Create an SmsMessage from a raw PDU with the specified message format. The
-     * message format is passed in the {@code SMS_RECEIVED_ACTION} as the {@code format}
+     * message format is passed in the
+     * {@link android.provider.Telephony.Sms.Intents#SMS_RECEIVED_ACTION} as the {@code format}
      * String extra, and will be either "3gpp" for GSM/UMTS/LTE messages in 3GPP format
      * or "3gpp2" for CDMA/LTE messages in 3GPP2 format.
      *
-     * @param pdu the message PDU from the SMS_RECEIVED_ACTION intent
-     * @param format the format extra from the SMS_RECEIVED_ACTION intent
-     * @hide pending API council approval
+     * @param pdu the message PDU from the
+     * {@link android.provider.Telephony.Sms.Intents#SMS_RECEIVED_ACTION} intent
+     * @param format the format extra from the
+     * {@link android.provider.Telephony.Sms.Intents#SMS_RECEIVED_ACTION} intent
      */
     public static SmsMessage createFromPdu(byte[] pdu, String format) {
         SmsMessageBase wrappedMessage;
@@ -297,7 +300,8 @@ public class SmsMessage {
     public static int[] calculateLength(CharSequence msgBody, boolean use7bitOnly) {
         // this function is for MO SMS
         TextEncodingDetails ted = (useCdmaFormatForMoSms()) ?
-            com.android.internal.telephony.cdma.SmsMessage.calculateLength(msgBody, use7bitOnly) :
+            com.android.internal.telephony.cdma.SmsMessage.calculateLength(msgBody, use7bitOnly,
+                    true) :
             com.android.internal.telephony.gsm.SmsMessage.calculateLength(msgBody, use7bitOnly);
         int ret[] = new int[4];
         ret[0] = ted.msgCount;
@@ -320,7 +324,7 @@ public class SmsMessage {
     public static ArrayList<String> fragmentText(String text) {
         // This function is for MO SMS
         TextEncodingDetails ted = (useCdmaFormatForMoSms()) ?
-            com.android.internal.telephony.cdma.SmsMessage.calculateLength(text, false) :
+            com.android.internal.telephony.cdma.SmsMessage.calculateLength(text, false, true) :
             com.android.internal.telephony.gsm.SmsMessage.calculateLength(text, false);
 
         // TODO(cleanup): The code here could be rolled into the logic
@@ -387,7 +391,7 @@ public class SmsMessage {
                             ted.languageTable, ted.languageShiftTable);
                 }
             } else {  // Assume unicode.
-                nextPos = pos + Math.min(limit / 2, textLen - pos);
+                nextPos = SmsMessageBase.findNextUnicodePosition(pos, limit, newMsgBody);
             }
             if ((nextPos <= pos) || (nextPos > textLen)) {
                 Rlog.e(LOG_TAG, "fragmentText failed (" + pos + " >= " + nextPos + " or " +
@@ -772,8 +776,15 @@ public class SmsMessage {
             return true;
         }
 
-        String simOperator = TelephonyManager.getDefault().getSimOperator();
-        String gid = TelephonyManager.getDefault().getGroupIdLevel1();
+        String simOperator;
+        String gid;
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            simOperator = TelephonyManager.getDefault().getSimOperatorNumeric();
+            gid = TelephonyManager.getDefault().getGroupIdLevel1();
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
 
         for (NoEmsSupportConfig currentConfig : mNoEmsSupportConfigList) {
             if (simOperator.startsWith(currentConfig.mOperatorNumber) &&
@@ -795,8 +806,16 @@ public class SmsMessage {
             return false;
         }
 
-        String simOperator = TelephonyManager.getDefault().getSimOperator();
-        String gid = TelephonyManager.getDefault().getGroupIdLevel1();
+        String simOperator;
+        String gid;
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            simOperator = TelephonyManager.getDefault().getSimOperatorNumeric();
+            gid = TelephonyManager.getDefault().getGroupIdLevel1();
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+
         for (NoEmsSupportConfig currentConfig : mNoEmsSupportConfigList) {
             if (simOperator.startsWith(currentConfig.mOperatorNumber) &&
                 (TextUtils.isEmpty(currentConfig.mGid1) ||

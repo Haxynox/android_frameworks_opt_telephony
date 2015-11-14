@@ -24,6 +24,7 @@ import android.content.SharedPreferences;
 import android.database.SQLException;
 import android.net.Uri;
 import android.os.AsyncResult;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
@@ -42,6 +43,9 @@ import android.telephony.SubscriptionManager;
 import android.telephony.cdma.CdmaCellLocation;
 import android.text.TextUtils;
 import android.telephony.Rlog;
+import android.util.Log;
+
+import android.telephony.TelephonyManager;
 
 import com.android.ims.ImsManager;
 import com.android.internal.telephony.Call;
@@ -67,7 +71,6 @@ import com.android.internal.telephony.dataconnection.DcTracker;
 import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.telephony.uicc.IccException;
 import com.android.internal.telephony.uicc.IccRecords;
-import com.android.internal.telephony.uicc.RuimRecords;
 import com.android.internal.telephony.uicc.UiccCard;
 import com.android.internal.telephony.uicc.UiccCardApplication;
 import com.android.internal.telephony.uicc.UiccController;
@@ -79,9 +82,6 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_ALPHA;
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_ISO_COUNTRY;
-import static com.android.internal.telephony.TelephonyProperties.PROPERTY_ICC_OPERATOR_NUMERIC;
 
 /**
  * {@hide}
@@ -176,9 +176,9 @@ public class CDMAPhone extends PhoneBase {
             = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,LOG_TAG);
 
+        TelephonyManager tm = TelephonyManager.from(mContext);
         //Change the system setting
-        SystemProperties.set(TelephonyProperties.CURRENT_ACTIVE_PHONE,
-                Integer.toString(PhoneConstants.PHONE_TYPE_CDMA));
+        tm.setPhoneType(getPhoneId(), PhoneConstants.PHONE_TYPE_CDMA);
 
         // This is needed to handle phone process crashes
         String inEcm=SystemProperties.get(TelephonyProperties.PROPERTY_INECM_MODE, "false");
@@ -189,8 +189,7 @@ public class CDMAPhone extends PhoneBase {
         }
 
         // get the string that specifies the carrier OTA Sp number
-        mCarrierOtaSpNumSchema = SystemProperties.get(
-                TelephonyProperties.PROPERTY_OTASP_NUM_SCHEMA,"");
+        mCarrierOtaSpNumSchema = tm.getOtaSpNumberSchemaForPhone(getPhoneId(), "");
 
         // Sets operator properties by retrieving from build-time system property
         String operatorAlpha = SystemProperties.get("ro.cdma.home.operator.alpha");
@@ -201,12 +200,12 @@ public class CDMAPhone extends PhoneBase {
             log("init: APP_FAM_3GPP == NULL");
             if (!TextUtils.isEmpty(operatorAlpha)) {
                 log("init: set 'gsm.sim.operator.alpha' to operator='" + operatorAlpha + "'");
-                setSystemProperty(PROPERTY_ICC_OPERATOR_ALPHA, operatorAlpha);
+                tm.setSimOperatorNameForPhone(mPhoneId, operatorAlpha);
             }
             if (!TextUtils.isEmpty(operatorNumeric)) {
                 log("init: set 'gsm.sim.operator.numeric' to operator='" + operatorNumeric + "'");
                 log("update icc_operator_numeric=" + operatorNumeric);
-                setSystemProperty(PROPERTY_ICC_OPERATOR_NUMERIC, operatorNumeric);
+                tm.setSimOperatorNumericForPhone(mPhoneId, operatorNumeric);
 
                 SubscriptionController.getInstance().setMccMnc(operatorNumeric, getSubId());
             }
@@ -294,6 +293,13 @@ public class CDMAPhone extends PhoneBase {
 
     @Override
     public PhoneConstants.State getState() {
+        if (mImsPhone != null) {
+            PhoneConstants.State imsState = mImsPhone.getState();
+            if (imsState != PhoneConstants.State.IDLE) {
+                return imsState;
+            }
+        }
+
         return mCT.mState;
     }
 
@@ -401,32 +407,60 @@ public class CDMAPhone extends PhoneBase {
     @Override
     public Connection
     dial (String dialString, int videoState) throws CallStateException {
-        ImsPhone imsPhone = mImsPhone;
+        return dial(dialString, null, videoState, null);
+    }
 
-        boolean imsUseEnabled =
-                ImsManager.isVolteEnabledByPlatform(mContext) &&
-                ImsManager.isEnhanced4gLteModeSettingEnabledByUser(mContext);
-        if (!imsUseEnabled) {
-            Rlog.w(LOG_TAG, "IMS is disabled: forced to CS");
+
+    @Override
+    protected Connection
+    dialInternal (String dialString, UUSInfo uusInfo, int videoState, Bundle intentExtras)
+            throws CallStateException {
+        // Need to make sure dialString gets parsed properly
+        String newDialString = PhoneNumberUtils.stripSeparators(dialString);
+        return mCT.dial(newDialString);
+    }
+
+    @Override
+    public Connection dial(String dialString, UUSInfo uusInfo, int videoState, Bundle intentExtras)
+            throws CallStateException {
+        if (uusInfo != null) {
+            throw new CallStateException("Sending UUS information NOT supported in CDMA!");
         }
 
+        boolean isEmergency = PhoneNumberUtils.isEmergencyNumber(dialString);
+        ImsPhone imsPhone = mImsPhone;
+
+        boolean imsUseEnabled = isImsUseEnabled()
+                 && imsPhone != null
+                 && (imsPhone.isVolteEnabled() || imsPhone.isVowifiEnabled())
+                 && (imsPhone.getServiceState().getState() == ServiceState.STATE_IN_SERVICE);
+
+        boolean useImsForEmergency = ImsManager.isVolteEnabledByPlatform(mContext)
+                && imsPhone != null
+                && isEmergency
+                &&  mContext.getResources().getBoolean(
+                        com.android.internal.R.bool.useImsAlwaysForEmergencyCall)
+                && ImsManager.isNonTtyOrTtyOnVolteEnabled(mContext)
+                && (imsPhone.getServiceState().getState() != ServiceState.STATE_POWER_OFF);
+
         if (DBG) {
-            Rlog.d(LOG_TAG, "imsUseEnabled=" + imsUseEnabled + ", imsPhone=" + imsPhone
+            Rlog.d(LOG_TAG, "imsUseEnabled=" + imsUseEnabled
+                    + ", useImsForEmergency=" + useImsForEmergency
+                    + ", imsPhone=" + imsPhone
                     + ", imsPhone.isVolteEnabled()="
                     + ((imsPhone != null) ? imsPhone.isVolteEnabled() : "N/A")
+                    + ", imsPhone.isVowifiEnabled()="
+                    + ((imsPhone != null) ? imsPhone.isVowifiEnabled() : "N/A")
                     + ", imsPhone.getServiceState().getState()="
                     + ((imsPhone != null) ? imsPhone.getServiceState().getState() : "N/A"));
         }
 
-        if (imsUseEnabled && imsPhone != null && imsPhone.isVolteEnabled()
-                && ((imsPhone.getServiceState().getState() == ServiceState.STATE_IN_SERVICE
-                && !PhoneNumberUtils.isEmergencyNumber(dialString))
-                || (PhoneNumberUtils.isEmergencyNumber(dialString)
-                && mContext.getResources().getBoolean(
-                        com.android.internal.R.bool.useImsAlwaysForEmergencyCall))) ) {
+        ImsPhone.checkWfcWifiOnlyModeBeforeDial(mImsPhone, mContext);
+
+        if (imsUseEnabled || useImsForEmergency) {
             try {
                 if (DBG) Rlog.d(LOG_TAG, "Trying IMS PS call");
-                return imsPhone.dial(dialString, videoState);
+                return imsPhone.dial(dialString, uusInfo, videoState, intentExtras);
             } catch (CallStateException e) {
                 if (DBG) Rlog.d(LOG_TAG, "IMS PS call exception " + e +
                         "imsUseEnabled =" + imsUseEnabled + ", imsPhone =" + imsPhone);
@@ -438,24 +472,12 @@ public class CDMAPhone extends PhoneBase {
             }
         }
 
+        if (mSST != null && mSST.mSS.getState() == ServiceState.STATE_OUT_OF_SERVICE
+                && mSST.mSS.getDataRegState() != ServiceState.STATE_IN_SERVICE && !isEmergency) {
+            throw new CallStateException("cannot dial in current state");
+        }
         if (DBG) Rlog.d(LOG_TAG, "Trying (non-IMS) CS call");
-        return dialInternal(dialString, null, videoState);
-    }
-
-
-    @Override
-    protected Connection
-    dialInternal (String dialString, UUSInfo uusInfo,
-            int videoState) throws CallStateException {
-        // Need to make sure dialString gets parsed properly
-        String newDialString = PhoneNumberUtils.stripSeparators(dialString);
-        return mCT.dial(newDialString);
-    }
-
-    @Override
-    public Connection dial(String dialString, UUSInfo uusInfo, int videoState)
-            throws CallStateException {
-        throw new CallStateException("Sending UUS information NOT supported in CDMA!");
+        return dialInternal(dialString, null, videoState, intentExtras);
     }
 
     @Override
@@ -572,6 +594,9 @@ public class CDMAPhone extends PhoneBase {
     @Override
     public String getNai() {
         IccRecords r = mIccRecords.get();
+        if (Log.isLoggable(LOG_TAG, Log.VERBOSE)) {
+            Rlog.v(LOG_TAG, "IccRecords is " + r);
+        }
         return (r != null) ? r.getNAI() : null;
     }
 
@@ -600,6 +625,12 @@ public class CDMAPhone extends PhoneBase {
     @Override
     public String getGroupIdLevel1() {
         Rlog.e(LOG_TAG, "GID1 is not available in CDMA");
+        return null;
+    }
+
+    @Override
+    public String getGroupIdLevel2() {
+        Rlog.e(LOG_TAG, "GID2 is not available in CDMA");
         return null;
     }
 
@@ -680,8 +711,9 @@ public class CDMAPhone extends PhoneBase {
     }
 
     @Override
-    public void setLine1Number(String alphaTag, String number, Message onComplete) {
+    public boolean setLine1Number(String alphaTag, String number, final Message onComplete) {
         Rlog.e(LOG_TAG, "setLine1Number: not possible in CDMA");
+        return false;
     }
 
     @Override
@@ -1112,7 +1144,12 @@ public class CDMAPhone extends PhoneBase {
             sendEmergencyCallbackModeChange();
             // Re-initiate data connection
             mDcTracker.setInternalDataEnabled(true);
+            notifyEmergencyCallRegistrants(false);
         }
+    }
+
+    protected void notifyEmergencyCallRegistrants(boolean started) {
+        mEmergencyCallToggledRegistrants.notifyResult(started ? 1 : 0);
     }
 
     /**
@@ -1184,6 +1221,7 @@ public class CDMAPhone extends PhoneBase {
 
                 mCi.getDeviceIdentity(obtainMessage(EVENT_GET_DEVICE_IDENTITY_DONE));
                 mCi.getRadioCapability(obtainMessage(EVENT_GET_RADIO_CAPABILITY));
+                startLceAfterRadioIsAvailable();
             }
             break;
 
@@ -1195,7 +1233,8 @@ public class CDMAPhone extends PhoneBase {
                 }
 
                 if (DBG) Rlog.d(LOG_TAG, "Baseband version: " + ar.result);
-                setSystemProperty(TelephonyProperties.PROPERTY_BASEBAND_VERSION, (String)ar.result);
+                TelephonyManager.from(mContext).setBasebandVersionForPhone(getPhoneId(),
+                        (String)ar.result);
             }
             break;
 
@@ -1245,6 +1284,9 @@ public class CDMAPhone extends PhoneBase {
             case EVENT_RADIO_ON:{
                 Rlog.d(LOG_TAG, "Event EVENT_RADIO_ON Received");
                 handleCdmaSubscriptionSource(mCdmaSSM.getCdmaSubscriptionSource());
+                // If this is on APM off, SIM may already be loaded. Send setPreferredNetworkType
+                // request to RIL to preserve user setting across APM toggling
+                setPreferredNetworkTypeIfSimLoaded();
             }
             break;
 
@@ -1659,9 +1701,10 @@ public class CDMAPhone extends PhoneBase {
      *
      */
     protected void setIsoCountryProperty(String operatorNumeric) {
+        TelephonyManager tm = TelephonyManager.from(mContext);
         if (TextUtils.isEmpty(operatorNumeric)) {
             log("setIsoCountryProperty: clear 'gsm.sim.operator.iso-country'");
-            setSystemProperty(PROPERTY_ICC_OPERATOR_ISO_COUNTRY, "");
+            tm.setSimCountryIsoForPhone(mPhoneId, "");
         } else {
             String iso = "";
             try {
@@ -1674,7 +1717,7 @@ public class CDMAPhone extends PhoneBase {
             }
 
             log("setIsoCountryProperty: set 'gsm.sim.operator.iso-country' to iso=" + iso);
-            setSystemProperty(PROPERTY_ICC_OPERATOR_ISO_COUNTRY, iso);
+            tm.setSimCountryIsoForPhone(mPhoneId, iso);
         }
     }
 
@@ -1805,7 +1848,7 @@ public class CDMAPhone extends PhoneBase {
             return false;
         }
 
-        UiccCard card = mUiccController.getUiccCard();
+        UiccCard card = mUiccController.getUiccCard(getPhoneId());
         if (card == null) {
             return false;
         }
@@ -1816,8 +1859,8 @@ public class CDMAPhone extends PhoneBase {
         if (status) {
             IccRecords iccRecords = mIccRecords.get();
             if (iccRecords != null) {
-                SystemProperties.set(TelephonyProperties.PROPERTY_ICC_OPERATOR_ALPHA,
-                        iccRecords.getServiceProviderName());
+                TelephonyManager.from(mContext).setSimOperatorNameForPhone(
+                        mPhoneId, iccRecords.getServiceProviderName());
             }
             if (mSST != null) {
                 mSST.pollState();

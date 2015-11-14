@@ -16,6 +16,7 @@
 
 package com.android.internal.telephony.cdma;
 
+import android.content.Context;
 import android.os.AsyncResult;
 import android.os.Handler;
 import android.os.Message;
@@ -25,6 +26,8 @@ import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.ServiceState;
 import android.telephony.Rlog;
+import android.telephony.TelephonyManager;
+
 import android.os.SystemProperties;
 import android.text.TextUtils;
 
@@ -33,10 +36,13 @@ import com.android.internal.telephony.CallTracker;
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.DriverCall;
+import com.android.internal.telephony.LastCallFailCause;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneBase;
 import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.TelephonyProperties;
+import com.android.internal.telephony.imsphone.ImsPhone;
+import com.android.internal.telephony.imsphone.ImsPhoneConnection;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -173,11 +179,11 @@ public final class CdmaCallTracker extends CallTracker {
             throw new CallStateException("cannot dial in current state");
         }
 
+        TelephonyManager tm =
+                (TelephonyManager) mPhone.getContext().getSystemService(Context.TELEPHONY_SERVICE);
         String origNumber = dialString;
-        String operatorIsoContry = mPhone.getSystemProperty(
-                TelephonyProperties.PROPERTY_OPERATOR_ISO_COUNTRY, "");
-        String simIsoContry = mPhone.getSystemProperty(
-                TelephonyProperties.PROPERTY_ICC_OPERATOR_ISO_COUNTRY, "");
+        String operatorIsoContry = tm.getNetworkCountryIsoForPhone(mPhone.getPhoneId());
+        String simIsoContry = tm.getSimCountryIsoForPhone(mPhone.getPhoneId());
         boolean internationalRoaming = !TextUtils.isEmpty(operatorIsoContry)
                 && !TextUtils.isEmpty(simIsoContry)
                 && !simIsoContry.equals(operatorIsoContry);
@@ -466,6 +472,10 @@ public final class CdmaCallTracker extends CallTracker {
                 !(mForegroundCall.isIdle() && mBackgroundCall.isIdle())) {
             mState = PhoneConstants.State.OFFHOOK;
         } else {
+            ImsPhone imsPhone = (ImsPhone)mPhone.getImsPhone();
+            if ( mState == PhoneConstants.State.OFFHOOK && (imsPhone != null)){
+                imsPhone.callEndCleanupHandOverCallIfAny();
+            }
             mState = PhoneConstants.State.IDLE;
         }
 
@@ -569,17 +579,18 @@ public final class CdmaCallTracker extends CallTracker {
                     }
                     mConnections[i] = new CdmaConnection(mPhone.getContext(), dc, this, i);
 
-                    if (mHandoverConnection != null) {
+                    Connection hoConnection = getHoConnection(dc);
+                    if (hoConnection != null) {
                         // Single Radio Voice Call Continuity (SRVCC) completed
-                        mPhone.migrateFrom((PhoneBase) mPhone.getImsPhone());
-                        mConnections[i].migrateFrom(mHandoverConnection);
+                        mConnections[i].migrateFrom(hoConnection);
+                        mHandoverConnections.remove(hoConnection);
                         mPhone.notifyHandoverStateChanged(mConnections[i]);
-                        mHandoverConnection = null;
                     } else {
                         // find if the MT call is a new ring or unknown connection
                         newRinging = checkMtFindNewRinging(dc,i);
                         if (newRinging == null) {
                             unknownConnectionAppeared = true;
+                            newUnknown = mConnections[i];
                         }
                     }
                     checkAndEnableDataCallAfterEmergencyCallDropped();
@@ -677,6 +688,7 @@ public final class CdmaCallTracker extends CallTracker {
             if( mPendingCallInEcm) {
                 mPendingCallInEcm = false;
             }
+            checkAndEnableDataCallAfterEmergencyCallDropped();
         }
 
         if (newRinging != null) {
@@ -709,6 +721,13 @@ public final class CdmaCallTracker extends CallTracker {
                 mDroppedDuringPoll.remove(i);
                 hasAnyCallDisconnected |= conn.onDisconnect(conn.mCause);
             }
+        }
+
+        /* Disconnect any pending Handover connections */
+        for (Connection hoConnection : mHandoverConnections) {
+            log("handlePollCalls - disconnect hoConn= " + hoConnection.toString());
+            ((ImsPhoneConnection)hoConnection).onDisconnect(DisconnectCause.NOT_VALID);
+            mHandoverConnections.remove(hoConnection);
         }
 
         // Any non-local disconnects: determine cause
@@ -989,6 +1008,7 @@ public final class CdmaCallTracker extends CallTracker {
 
             case EVENT_GET_LAST_CALL_FAIL_CAUSE:
                 int causeCode;
+                String vendorCause = null;
                 ar = (AsyncResult)msg.obj;
 
                 operationComplete();
@@ -1000,7 +1020,9 @@ public final class CdmaCallTracker extends CallTracker {
                     Rlog.i(LOG_TAG,
                             "Exception during getLastCallFailCause, assuming normal disconnect");
                 } else {
-                    causeCode = ((int[])ar.result)[0];
+                    LastCallFailCause failCause = (LastCallFailCause)ar.result;
+                    causeCode = failCause.causeCode;
+                    vendorCause = failCause.vendorCause;
                 }
 
                 for (int i = 0, s =  mDroppedDuringPoll.size()
@@ -1008,7 +1030,7 @@ public final class CdmaCallTracker extends CallTracker {
                 ) {
                     CdmaConnection conn = mDroppedDuringPoll.get(i);
 
-                    conn.onRemoteDisconnect(causeCode);
+                    conn.onRemoteDisconnect(causeCode, vendorCause);
                 }
 
                 updatePhoneState();
@@ -1101,6 +1123,7 @@ public final class CdmaCallTracker extends CallTracker {
             if (Phone.DEBUG_PHONE) log("disableDataCallInEmergencyCall");
             mIsInEmergencyCall = true;
             mPhone.mDcTracker.setInternalDataEnabled(false);
+            mPhone.notifyEmergencyCallRegistrants(true);
         }
     }
 
@@ -1118,6 +1141,7 @@ public final class CdmaCallTracker extends CallTracker {
             if (inEcm.compareTo("false") == 0) {
                 // Re-initiate data connection
                 mPhone.mDcTracker.setInternalDataEnabled(true);
+                mPhone.notifyEmergencyCallRegistrants(false);
             }
         }
     }
@@ -1196,5 +1220,9 @@ public final class CdmaCallTracker extends CallTracker {
         pw.println(" mPendingCallClirMode=" + mPendingCallClirMode);
         pw.println(" mState=" + mState);
         pw.println(" mIsEcmTimerCanceled=" + mIsEcmTimerCanceled);
+    }
+    @Override
+    public PhoneConstants.State getState() {
+        return mState;
     }
 }
