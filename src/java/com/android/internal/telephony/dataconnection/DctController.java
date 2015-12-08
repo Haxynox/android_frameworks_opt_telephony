@@ -436,7 +436,7 @@ public class DctController extends Handler {
         Iterator<Integer> iterator = mRequestInfos.keySet().iterator();
         while (iterator.hasNext()) {
             RequestInfo requestInfo = mRequestInfos.get(iterator.next());
-            if (requestInfo.phoneId == phoneId) {
+            if (getRequestPhoneId(requestInfo.request) == phoneId) {
                 onExecuteRequest(requestInfo);
             }
         }
