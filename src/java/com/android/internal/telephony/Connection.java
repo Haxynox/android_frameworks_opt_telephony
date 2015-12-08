@@ -17,6 +17,7 @@
 package com.android.internal.telephony;
 
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.telecom.ConferenceParticipant;
 import android.telephony.Rlog;
@@ -53,6 +54,7 @@ public abstract class Connection {
         public void onCallSubstateChanged(int callSubstate);
         public void onMultipartyStateChanged(boolean isMultiParty);
         public void onConferenceMergedFailed();
+        public void onExtrasChanged(Bundle extras);
     }
 
     /**
@@ -80,6 +82,8 @@ public abstract class Connection {
         public void onMultipartyStateChanged(boolean isMultiParty) {}
         @Override
         public void onConferenceMergedFailed() {}
+        @Override
+        public void onExtrasChanged(Bundle extras) {}
     }
 
     public static final int AUDIO_QUALITY_STANDARD = 1;
@@ -125,6 +129,7 @@ public abstract class Connection {
     private int mCallSubstate;
     private android.telecom.Connection.VideoProvider mVideoProvider;
     public Call.State mPreHandoverState = Call.State.IDLE;
+    private Bundle mExtras;
 
     /* Instance Methods */
 
@@ -298,7 +303,7 @@ public abstract class Connection {
      */
     public Call.State getStateBeforeHandover() {
         return mPreHandoverState;
-    }
+   }
 
     /**
      * Get the details of conference participants. Expected to be
@@ -471,12 +476,7 @@ public abstract class Connection {
     public void migrateFrom(Connection c) {
         if (c == null) return;
         mListeners = c.mListeners;
-        mAddress = c.getAddress();
-        mNumberPresentation = c.getNumberPresentation();
         mDialString = c.getOrigDialString();
-        mCnapName = c.getCnapName();
-        mCnapNamePresentation = c.getCnapNamePresentation();
-        mIsIncoming = c.isIncoming();
         mCreateTime = c.getCreateTime();
         mConnectTime = c.getConnectTime();
         mConnectTimeReal = c.getConnectTimeReal();
@@ -626,6 +626,25 @@ public abstract class Connection {
         for (Listener l : mListeners) {
             l.onAudioQualityChanged(mAudioQuality);
         }
+    }
+
+    /**
+     * Notifies listeners that connection extras has changed.
+     * @param extras New connection extras.
+     */
+    public void setConnectionExtras(Bundle extras) {
+        mExtras = extras;
+        for (Listener l : mListeners) {
+            l.onExtrasChanged(extras);
+        }
+    }
+
+    /**
+     * Retrieves the current connection extras.
+     * @return the connection extras.
+     */
+    public Bundle getConnectionExtras() {
+        return mExtras;
     }
 
     /**

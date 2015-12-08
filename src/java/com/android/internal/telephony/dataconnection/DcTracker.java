@@ -57,6 +57,7 @@ import android.telephony.gsm.GsmCellLocation;
 import android.text.TextUtils;
 import android.util.EventLog;
 import android.util.LocalLog;
+import android.util.Pair;
 import android.view.WindowManager;
 import android.telephony.Rlog;
 
@@ -813,7 +814,11 @@ public final class DcTracker extends DcTrackerBase {
                         if (originalApns.size() != waitingApns.size() ||
                                 originalApns.containsAll(waitingApns) == false) {
                             apnContext.releaseDataConnection(reason);
+                        } else {
+                            continue;
                         }
+                    } else {
+                        continue;
                     }
                 }
             }
@@ -1043,10 +1048,14 @@ public final class DcTracker extends DcTrackerBase {
                                 disconnectAll = true;
                             }
                         }
-                        str = "cleanUpConnection: tearing down" + (disconnectAll ? " all" : "");
+                        final int generation = apnContext.getConnectionGeneration();
+                        str = "cleanUpConnection: tearing down" + (disconnectAll ? " all" : "") +
+                                " using gen#" + generation;
                         if (DBG) log(str + "apnContext=" + apnContext);
                         apnContext.requestLog(str);
-                        Message msg = obtainMessage(DctConstants.EVENT_DISCONNECT_DONE, apnContext);
+                        Pair<ApnContext, Integer> pair =
+                                new Pair<ApnContext, Integer>(apnContext, generation);
+                        Message msg = obtainMessage(DctConstants.EVENT_DISCONNECT_DONE, pair);
                         if (disconnectAll) {
                             apnContext.getDcAc().tearDownAll(apnContext.getReason(), msg);
                         } else {
@@ -1303,7 +1312,10 @@ public final class DcTracker extends DcTrackerBase {
                 return false;
             }
         }
-        if (DBG) log("setupData: dcac=" + dcac + " apnSetting=" + apnSetting);
+        final int generation = apnContext.incAndGetConnectionGeneration();
+        if (DBG) {
+            log("setupData: dcac=" + dcac + " apnSetting=" + apnSetting + " gen#=" + generation);
+        }
 
         apnContext.setDataConnectionAc(dcac);
         apnContext.setApnSetting(apnSetting);
@@ -1312,9 +1324,9 @@ public final class DcTracker extends DcTrackerBase {
 
         Message msg = obtainMessage();
         msg.what = DctConstants.EVENT_DATA_SETUP_COMPLETE;
-        msg.obj = apnContext;
+        msg.obj = new Pair<ApnContext, Integer>(apnContext, generation);
         dcac.bringUp(apnContext, getInitialMaxRetry(), profileId, radioTech,
-                mAutoAttachOnCreation.get(), msg);
+                mAutoAttachOnCreation.get(), msg, generation);
 
         if (DBG) log("setupData: initing!");
         return true;
@@ -1448,6 +1460,7 @@ public final class DcTracker extends DcTrackerBase {
         Intent intent = new Intent(INTENT_RECONNECT_ALARM + "." + apnType);
         intent.putExtra(INTENT_RECONNECT_ALARM_EXTRA_REASON, apnContext.getReason());
         intent.putExtra(INTENT_RECONNECT_ALARM_EXTRA_TYPE, apnType);
+        intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
 
         // Get current sub id.
         int subId = SubscriptionManager.getDefaultDataSubId();
@@ -1817,13 +1830,9 @@ public final class DcTracker extends DcTrackerBase {
 
         DcFailCause cause = DcFailCause.UNKNOWN;
         boolean handleError = false;
-        ApnContext apnContext = null;
+        ApnContext apnContext = getValidApnContext(ar, "onDataSetupComplete");
 
-        if(ar.userObj instanceof ApnContext){
-            apnContext = (ApnContext)ar.userObj;
-        } else {
-            throw new RuntimeException("onDataSetupComplete: No apnContext");
-        }
+        if (apnContext == null) return;
 
         if (ar.exception == null) {
             DcAsyncChannel dcac = apnContext.getDcAc();
@@ -2007,6 +2016,32 @@ public final class DcTracker extends DcTrackerBase {
     }
 
     /**
+     * check for obsolete messages.  Return ApnContext if valid, null if not
+     */
+    private ApnContext getValidApnContext(AsyncResult ar, String logString) {
+        if (ar != null && ar.userObj instanceof Pair) {
+            Pair<ApnContext, Integer>pair = (Pair<ApnContext, Integer>)ar.userObj;
+            ApnContext apnContext = pair.first;
+            if (apnContext != null) {
+                final int generation = apnContext.getConnectionGeneration();
+                if (DBG) {
+                    log("getValidApnContext (" + logString + ") on " + apnContext + " got " +
+                            generation + " vs " + pair.second);
+                }
+                if (generation == pair.second) {
+                    return apnContext;
+                } else {
+                    log("ignoring obsolete " + logString);
+                    return null;
+                }
+            }
+        }
+        throw new RuntimeException(logString + ": No apnContext");
+    }
+
+
+
+    /**
      * Error has occurred during the SETUP {aka bringUP} request and the DCT
      * should either try the next waiting APN or start over from the
      * beginning if the list is empty. Between each SETUP request there will
@@ -2015,13 +2050,9 @@ public final class DcTracker extends DcTrackerBase {
     @Override
     protected void onDataSetupCompleteError(AsyncResult ar) {
         String reason = "";
-        ApnContext apnContext = null;
+        ApnContext apnContext = getValidApnContext(ar, "onDataSetupCompleteError");
 
-        if(ar.userObj instanceof ApnContext){
-            apnContext = (ApnContext)ar.userObj;
-        } else {
-            throw new RuntimeException("onDataSetupCompleteError: No apnContext");
-        }
+        if (apnContext == null) return;
 
         // See if there are more APN's to try
         if (apnContext.getWaitingApns().isEmpty()) {
@@ -2055,15 +2086,9 @@ public final class DcTracker extends DcTrackerBase {
      * Called when EVENT_DISCONNECT_DONE is received.
      */
     @Override
-    protected void onDisconnectDone(int connId, AsyncResult ar) {
-        ApnContext apnContext = null;
-
-        if (ar.userObj instanceof ApnContext) {
-            apnContext = (ApnContext) ar.userObj;
-        } else {
-            loge("onDisconnectDone: Invalid ar in onDisconnectDone, ignore");
-            return;
-        }
+    protected void onDisconnectDone(AsyncResult ar) {
+        ApnContext apnContext = getValidApnContext(ar, "onDisconnectDone");
+        if (apnContext == null) return;
 
         if(DBG) log("onDisconnectDone: EVENT_DISCONNECT_DONE apnContext=" + apnContext);
         apnContext.setState(DctConstants.State.IDLE);
@@ -2134,16 +2159,10 @@ public final class DcTracker extends DcTrackerBase {
      * Called when EVENT_DISCONNECT_DC_RETRYING is received.
      */
     @Override
-    protected void onDisconnectDcRetrying(int connId, AsyncResult ar) {
+    protected void onDisconnectDcRetrying(AsyncResult ar) {
         // We could just do this in DC!!!
-        ApnContext apnContext = null;
-
-        if (ar.userObj instanceof ApnContext) {
-            apnContext = (ApnContext) ar.userObj;
-        } else {
-            loge("onDisconnectDcRetrying: Invalid ar in onDisconnectDone, ignore");
-            return;
-        }
+        ApnContext apnContext = getValidApnContext(ar, "onDisconnectDcRetrying");
+        if (apnContext == null) return;
 
         apnContext.setState(DctConstants.State.RETRYING);
         if(DBG) log("onDisconnectDcRetrying: apnContext=" + apnContext);
@@ -2760,10 +2779,12 @@ public final class DcTracker extends DcTrackerBase {
                 mIccRecords.set(null);
             }
             if (newIccRecords != null) {
-                log("New records found");
-                mIccRecords.set(newIccRecords);
-                newIccRecords.registerForRecordsLoaded(
-                        this, DctConstants.EVENT_RECORDS_LOADED, null);
+                if (mPhone.getSubId() >= 0) {
+                    log("New records found.");
+                    mIccRecords.set(newIccRecords);
+                    newIccRecords.registerForRecordsLoaded(
+                            this, DctConstants.EVENT_RECORDS_LOADED, null);
+                }
             } else {
                 onSimNotReady();
             }

@@ -107,6 +107,7 @@ public abstract class PhoneBase extends Handler implements Phone {
                 if (intent.getAction().equals(ImsManager.ACTION_IMS_SERVICE_UP)) {
                     mImsServiceReady = true;
                     updateImsPhone();
+                    ImsManager.updateImsServiceConfig(mContext, mPhoneId, false);
                 } else if (intent.getAction().equals(ImsManager.ACTION_IMS_SERVICE_DOWN)) {
                     mImsServiceReady = false;
                     updateImsPhone();
@@ -188,6 +189,11 @@ public abstract class PhoneBase extends Handler implements Phone {
     public static final String VM_COUNT = "vm_count_key";
     // Key used to read/write the ID for storing the voice mail
     public static final String VM_ID = "vm_id_key";
+
+    // Key used for storing call forwarding status
+    public static final String CF_STATUS = "cf_status_key";
+    // Key used to read/write the ID for storing the call forwarding status
+    public static final String CF_ID = "cf_id_key";
 
     // Key used to read/write "disable DNS server check" pref (used for testing)
     public static final String DNS_SERVER_CHECK_DISABLED_KEY = "dns_server_check_disabled_key";
@@ -495,6 +501,7 @@ public abstract class PhoneBase extends Handler implements Phone {
             if (imsManager != null && imsManager.isServiceAvailable()) {
                 mImsServiceReady = true;
                 updateImsPhone();
+                ImsManager.updateImsServiceConfig(mContext, mPhoneId, false);
             }
         }
     }
@@ -790,6 +797,9 @@ public abstract class PhoneBase extends Handler implements Phone {
        mHandoverRegistrants.notifyRegistrants(ar);
     }
 
+    protected void setIsInEmergencyCall() {
+    }
+
     public void migrateFrom(PhoneBase from) {
         migrate(mHandoverRegistrants, from.mHandoverRegistrants);
         migrate(mPreciseCallStateRegistrants, from.mPreciseCallStateRegistrants);
@@ -801,12 +811,30 @@ public abstract class PhoneBase extends Handler implements Phone {
         migrate(mMmiRegistrants, from.mMmiRegistrants);
         migrate(mUnknownConnectionRegistrants, from.mUnknownConnectionRegistrants);
         migrate(mSuppServiceFailedRegistrants, from.mSuppServiceFailedRegistrants);
+        if (from.isInEmergencyCall()) {
+            setIsInEmergencyCall();
+        }
     }
 
     public void migrate(RegistrantList to, RegistrantList from) {
         from.removeCleared();
         for (int i = 0, n = from.size(); i < n; i++) {
-            to.add((Registrant) from.get(i));
+            Registrant r = (Registrant) from.get(i);
+            Message msg = r.messageForRegistrant();
+            // Since CallManager has already registered with both CS and IMS phones,
+            // the migrate should happen only for those registrants which are not
+            // registered with CallManager.Hence the below check is needed to add
+            // only those registrants to the registrant list which are not
+            // coming from the CallManager.
+            if (msg != null) {
+                if (msg.obj == CallManager.getInstance().getRegistrantIdentifier()) {
+                    continue;
+                } else {
+                    to.add((Registrant) from.get(i));
+                }
+            } else {
+                Rlog.d(LOG_TAG, "msg is null");
+            }
         }
     }
 
@@ -996,23 +1024,26 @@ public abstract class PhoneBase extends Handler implements Phone {
                 // send the setting on error
             }
         }
-        if (doAutomatic) {
-            // wrap the response message in our own message along with
-            // an empty string (to indicate automatic selection) for the
-            // operator's id.
-            NetworkSelectMessage nsm = new NetworkSelectMessage();
-            nsm.message = response;
-            nsm.operatorNumeric = "";
-            nsm.operatorAlphaLong = "";
-            nsm.operatorAlphaShort = "";
 
+        // wrap the response message in our own message along with
+        // an empty string (to indicate automatic selection) for the
+        // operator's id.
+        NetworkSelectMessage nsm = new NetworkSelectMessage();
+        nsm.message = response;
+        nsm.operatorNumeric = "";
+        nsm.operatorAlphaLong = "";
+        nsm.operatorAlphaShort = "";
+
+        if (doAutomatic) {
             Message msg = obtainMessage(EVENT_SET_NETWORK_AUTOMATIC_COMPLETE, nsm);
             mCi.setNetworkSelectionModeAutomatic(msg);
-
-            updateSavedNetworkOperator(nsm);
         } else {
             Rlog.d(LOG_TAG, "setNetworkSelectionModeAutomatic - already auto, ignoring");
+            ar.userObj = nsm;
+            handleSetSelectNetwork(ar);
         }
+
+        updateSavedNetworkOperator(nsm);
     }
 
     @Override
@@ -1021,7 +1052,8 @@ public abstract class PhoneBase extends Handler implements Phone {
     }
 
     @Override
-    public void selectNetworkManually(OperatorInfo network, Message response) {
+    public void selectNetworkManually(OperatorInfo network, boolean persistSelection,
+            Message response) {
         // wrap the response message in our own message along with
         // the operator's id.
         NetworkSelectMessage nsm = new NetworkSelectMessage();
@@ -1033,7 +1065,11 @@ public abstract class PhoneBase extends Handler implements Phone {
         Message msg = obtainMessage(EVENT_SET_NETWORK_MANUAL_COMPLETE, nsm);
         mCi.setNetworkSelectionModeManual(network.getOperatorNumeric(), msg);
 
-        updateSavedNetworkOperator(nsm);
+        if (persistSelection) {
+            updateSavedNetworkOperator(nsm);
+        } else {
+            clearSavedNetworkSelection();
+        }
     }
 
     /**
@@ -1108,6 +1144,17 @@ public abstract class PhoneBase extends Handler implements Phone {
     }
 
     /**
+     * Clears the saved network selection.
+     */
+    private void clearSavedNetworkSelection() {
+        // open the shared preferences and search with our key.
+        PreferenceManager.getDefaultSharedPreferences(getContext()).edit().
+                remove(NETWORK_SELECTION_KEY + getSubId()).
+                remove(NETWORK_SELECTION_NAME_KEY + getSubId()).
+                remove(NETWORK_SELECTION_SHORT_KEY + getSubId()).commit();
+    }
+
+    /**
      * Method to restore the previously saved operator id, or reset to
      * automatic selection, all depending upon the value in the shared
      * preferences.
@@ -1120,7 +1167,23 @@ public abstract class PhoneBase extends Handler implements Phone {
         if (networkSelection == null || TextUtils.isEmpty(networkSelection.getOperatorNumeric())) {
             setNetworkSelectionModeAutomatic(response);
         } else {
-            selectNetworkManually(networkSelection, response);
+            selectNetworkManually(networkSelection, true, response);
+        }
+    }
+
+    /**
+     * Saves CLIR setting so that we can re-apply it as necessary
+     * (in case the RIL resets it across reboots).
+     */
+    public void saveClirSetting(int commandInterfaceCLIRMode) {
+        // Open the shared preferences editor, and write the value.
+        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(getContext());
+        SharedPreferences.Editor editor = sp.edit();
+        editor.putInt(CLIR_KEY + getPhoneId(), commandInterfaceCLIRMode);
+
+        // Commit and log the result.
+        if (!editor.commit()) {
+            Rlog.e(LOG_TAG, "Failed to commit CLIR preference");
         }
     }
 
@@ -1389,10 +1452,58 @@ public abstract class PhoneBase extends Handler implements Phone {
         return mVmCount != 0;
     }
 
+    private int getCallForwardingIndicatorFromSharedPref() {
+        int status = IccRecords.CALL_FORWARDING_STATUS_DISABLED;
+        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(mContext);
+        String subscriberId = sp.getString(CF_ID, null);
+        String currentSubscriberId = getSubscriberId();
+
+        if (currentSubscriberId != null && currentSubscriberId.equals(subscriberId)) {
+            // get call forwarding status from preferences
+            status = sp.getInt(CF_STATUS, IccRecords.CALL_FORWARDING_STATUS_DISABLED);
+            Rlog.d(LOG_TAG, "Call forwarding status from preference = " + status);
+        } else {
+            Rlog.d(LOG_TAG, "Call forwarding status retrieval returning DISABLED as status for " +
+                    "matching subscriberId not found");
+
+        }
+        return status;
+    }
+
+    private void setCallForwardingIndicatorInSharedPref(boolean enable) {
+        SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(mContext);
+        SharedPreferences.Editor editor = sp.edit();
+
+        String imsi = getSubscriberId();
+
+        editor.putInt(CF_STATUS, enable ? IccRecords.CALL_FORWARDING_STATUS_ENABLED :
+                IccRecords.CALL_FORWARDING_STATUS_DISABLED);
+        editor.putString(CF_ID, imsi);
+        editor.apply();
+    }
+
+    public void setVoiceCallForwardingFlag(int line, boolean enable, String number) {
+        setCallForwardingIndicatorInSharedPref(enable);
+        mIccRecords.get().setVoiceCallForwardingFlag(line, enable, number);
+    }
+
+    protected void setVoiceCallForwardingFlag(IccRecords r, int line, boolean enable,
+                                              String number) {
+        setCallForwardingIndicatorInSharedPref(enable);
+        r.setVoiceCallForwardingFlag(line, enable, number);
+    }
+
     @Override
     public boolean getCallForwardingIndicator() {
         IccRecords r = mIccRecords.get();
-        return (r != null) ? r.getVoiceCallForwardingFlag() : false;
+        int callForwardingIndicator = IccRecords.CALL_FORWARDING_STATUS_UNKNOWN;
+        if (r != null) {
+            callForwardingIndicator = r.getVoiceCallForwardingFlag();
+        }
+        if (callForwardingIndicator == IccRecords.CALL_FORWARDING_STATUS_UNKNOWN) {
+            callForwardingIndicator = getCallForwardingIndicatorFromSharedPref();
+        }
+        return (callForwardingIndicator == IccRecords.CALL_FORWARDING_STATUS_ENABLED);
     }
 
     /**
@@ -1664,8 +1775,7 @@ public abstract class PhoneBase extends Handler implements Phone {
         String subscriberId = sp.getString(VM_ID, null);
         String currentSubscriberId = getSubscriberId();
 
-        if ((subscriberId != null) && (currentSubscriberId != null)
-                && (currentSubscriberId.equals(subscriberId))) {
+        if (currentSubscriberId != null && currentSubscriberId.equals(subscriberId)) {
             // get voice mail count from preferences
             countVoiceMessages = sp.getInt(VM_COUNT, 0);
             Rlog.d(LOG_TAG, "Voice Mail Count from preference = " + countVoiceMessages);
@@ -1945,6 +2055,12 @@ public abstract class PhoneBase extends Handler implements Phone {
         mNewRingingConnectionRegistrants.notifyRegistrants(ar);
     }
 
+    /**
+     * Notify registrants of a new unknown connection.
+     */
+    public void notifyUnknownConnectionP(Connection cn) {
+        mUnknownConnectionRegistrants.notifyResult(cn);
+    }
 
     /**
      * Notify registrants if phone is video capable.
@@ -2098,6 +2214,11 @@ public abstract class PhoneBase extends Handler implements Phone {
     @Override
     public Phone getImsPhone() {
         return mImsPhone;
+    }
+
+    @Override
+    public boolean isUtEnabled() {
+        return false;
     }
 
     @Override
@@ -2347,6 +2468,11 @@ public abstract class PhoneBase extends Handler implements Phone {
     }
 
     @Override
+    public boolean isShuttingDown() {
+        return getServiceStateTracker().isDeviceShuttingDown();
+    }
+
+    @Override
     public void setRadioCapability(RadioCapability rc, Message response) {
         mCi.setRadioCapability(rc, response);
     }
@@ -2433,7 +2559,7 @@ public abstract class PhoneBase extends Handler implements Phone {
         ImsPhone imsPhone = mImsPhone;
         if ((imsPhone != null)
                 && (imsPhone.getServiceState().getState() == ServiceState.STATE_IN_SERVICE)) {
-            return imsPhone.isVideoEnabled();
+            return imsPhone.isVideoCallEnabled();
         }
         return false;
     }
@@ -2467,6 +2593,16 @@ public abstract class PhoneBase extends Handler implements Phone {
         }
 
         return getLocaleFromCarrierProperties(mContext);
+    }
+
+    protected boolean isMatchGid(String gid) {
+        String gid1 = getGroupIdLevel1();
+        int gidLength = gid.length();
+        if (!TextUtils.isEmpty(gid1) && (gid1.length() >= gidLength)
+                && gid1.substring(0, gidLength).equalsIgnoreCase(gid)) {
+            return true;
+        }
+        return false;
     }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
